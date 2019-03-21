@@ -5,9 +5,16 @@ from glob import glob
 import tensorflow as tf
 import numpy as np
 from six.moves import xrange
+import csv
+import matplotlib.pyplot as plt
+import cv2
+from PIL import Image
 
 from ops import *
 from utils import *
+
+def tf_log(x):
+    return tf.log(tf.clip_by_value(x, 1e-10, x))
 
 class pix2pix(object):
     def __init__(self, sess, image_size=256,
@@ -79,15 +86,15 @@ class pix2pix(object):
 
         self.real_AB = tf.concat([self.real_A, self.real_B], 2)
         self.fake_AB = tf.concat([self.real_A, self.fake_B], 2)
-        self.D, self.D_logits = self.discriminator(self.real_AB, reuse=False)
-        self.D_, self.D_logits_ = self.discriminator(self.fake_AB, reuse=True)
+        self.D, self.D_logits, self.D_h3 = self.discriminator(self.real_AB, reuse=False)
+        self.D_, self.D_logits_, self.D_h3_ = self.discriminator(self.fake_AB, reuse=True)
 
         self.fake_B_sample = self.sampler(self.real_A)
 
         self.d_sum = tf.summary.histogram("d", self.D)
         self.d__sum = tf.summary.histogram("d_", self.D_)
         self.fake_B_sum = tf.summary.image("fake_B", self.fake_B)
-
+        
         self.d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits, labels=tf.ones_like(self.D)))
         self.d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.zeros_like(self.D_)))
         self.g_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.ones_like(self.D_))) \
@@ -110,7 +117,7 @@ class pix2pix(object):
 
 
     def load_random_samples(self):
-        data = np.random.choice(glob('./datasets/{}/val/*.jpg'.format(self.dataset_name)), self.batch_size)
+        data = np.random.choice(glob('/root/userspace/eye2mouth/datasets/{}/val/*.jpg'.format(self.dataset_name)), self.batch_size)
         sample = [load_data(sample_file, fine_size=self.image_size) for sample_file in data]
 
         if (self.is_grayscale):
@@ -119,25 +126,51 @@ class pix2pix(object):
             sample_images = np.array(sample).astype(np.float32)
         return sample_images
 
-    def sample_model(self, sample_dir, epoch, idx):
+    def save_weights(self, sample_dir, epoch, idx, d_h3, w_name, b_name, save_name):
+        ws = [v for v in tf.trainable_variables() if v.name == w_name][0]
+        ws = ws.eval() # tf.Tensor -> np array
+        ws = ws.flatten() # np array (n,1) -> (n)
+        ws = np.reshape(ws, (16,32,512)) # np array reshape
+        b = [v for v in tf.trainable_variables() if v.name == b_name][0]
+        b = b.eval()
+        sample_weights = np.sum(ws * d_h3 + b, axis=3) # sum [batch_size,16,16,1024] along the axis=3
+        sample_weights = sample_weights[:,:,:,np.newaxis] # add new axis (with size 1) for color
+        sample_weights = np.insert(sample_weights, 1, 0, axis=3)
+        sample_weights = np.insert(sample_weights, 2, 0, axis=3)
+        sample_weights = rot90_batch(sample_weights, 3)
+        sample_weights_resize = []
+        for s in sample_weights:
+            s_max = (s.max(axis=0)).max(axis=0)[0] # only first-dim is filled with non-zero value
+            s_min = (s.min(axis=0)).min(axis=0)[0] # only first-dim is filled with non-zero value
+            shift = np.array([s_min, 0, 0])
+            norm = np.array([1.0/(s_max-s_min), 1.0, 1.0])
+            s = (255.0-(s-shift)*norm*255.0).astype(np.uint8) # black <-> white
+            s[:,:,1]=s[:,:,2]=s[:,:,0] # color to grey-scale
+            s_image = Image.fromarray(s, 'RGB')
+            s_image = s_image.resize((self.image_size, self.image_size))
+            sample_weights_resize.append(np.array(s_image))
+        sample_weights_resize = np.array(sample_weights_resize)
+        save_images(sample_weights_resize, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/{}_{:02d}_{:04d}.png'.format(sample_dir, save_name, epoch, idx))
+    
+    def sample_model(self, sample_dir, epoch, idx, save_weights=False):
         sample_images = self.load_random_samples()
-        samples, d_loss, g_loss = self.sess.run(
-            [self.fake_B_sample, self.d_loss, self.g_loss],
-            feed_dict={self.real_data: sample_images}
-        )
+        samples, d_loss, g_loss, d_h3, d_h3_ = self.sess.run([self.fake_B_sample, self.d_loss, self.g_loss, self.D_h3, self.D_h3_], feed_dict={self.real_data: sample_images})
         sample_a = sample_images[:, :, :, :3]
         samples_concat = np.concatenate((sample_a, samples), axis=2)
         samples_concat = rot90_batch(samples_concat, 3)
         samples_concat = imresize_batch(samples_concat, (self.image_size, self.image_size))
-        save_images(samples_concat, [self.batch_size, 1],
-                    './{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
+        if save_weights:
+            self.save_weights(sample_dir, epoch, idx, d_h3_, 'discriminator/d_h3_lin/Matrix:0', 'discriminator/d_h3_lin/bias:0', 'fake')
+            self.save_weights(sample_dir, epoch, idx, d_h3, 'discriminator/d_h3_lin/Matrix:0', 'discriminator/d_h3_lin/bias:0', 'real')
+        
+        save_images(samples_concat, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
         print("[Sample] d_loss: {:.8f}, g_loss: {:.8f}".format(d_loss, g_loss))
 
     def train(self, args):
         """Train pix2pix"""
-        d_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+        d_optim = tf.train.AdamOptimizer(args.lrd, beta1=args.beta1) \
                           .minimize(self.d_loss, var_list=self.d_vars)
-        g_optim = tf.train.AdamOptimizer(args.lr, beta1=args.beta1) \
+        g_optim = tf.train.AdamOptimizer(args.lrg, beta1=args.beta1) \
                           .minimize(self.g_loss, var_list=self.g_vars)
 
         init_op = tf.global_variables_initializer()
@@ -146,7 +179,7 @@ class pix2pix(object):
         self.g_sum = tf.summary.merge([self.d__sum,
             self.fake_B_sum, self.d_loss_fake_sum, self.g_loss_sum])
         self.d_sum = tf.summary.merge([self.d_sum, self.d_loss_real_sum, self.d_loss_sum])
-        self.writer = tf.summary.FileWriter("./logs", self.sess.graph)
+        self.writer = tf.summary.FileWriter("/root/userspace/eye2mouth/logs", self.sess.graph)
 
         counter = 1
         start_time = time.time()
@@ -156,8 +189,9 @@ class pix2pix(object):
         else:
             print(" [!] Load failed...")
 
+        log_loss = []
         for epoch in xrange(args.epoch):
-            data = glob('./datasets/{}/train/*.jpg'.format(self.dataset_name))
+            data = glob('/root/userspace/eye2mouth/datasets/{}/train/*.jpg'.format(self.dataset_name))
             #np.random.shuffle(data)
             batch_idxs = min(len(data), args.train_size) // self.batch_size
 
@@ -184,6 +218,11 @@ class pix2pix(object):
                                                feed_dict={ self.real_data: batch_images })
                 self.writer.add_summary(summary_str, counter)
 
+                # Try three time g_optim (My change. I want to reduce the effect of L1 norm.)
+                _, summary_str = self.sess.run([g_optim, self.g_sum],
+                                               feed_dict={ self.real_data: batch_images })
+                self.writer.add_summary(summary_str, counter)
+                
                 errD_fake = self.d_loss_fake.eval({self.real_data: batch_images})
                 errD_real = self.d_loss_real.eval({self.real_data: batch_images})
                 errG = self.g_loss.eval({self.real_data: batch_images})
@@ -192,12 +231,17 @@ class pix2pix(object):
                 print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
                     % (epoch, idx, batch_idxs,
                         time.time() - start_time, errD_fake+errD_real, errG))
+                log_loss.append([epoch, idx, batch_idxs, time.time() - start_time, errD_fake+errD_real, errG])
 
-                if np.mod(counter, 100) == 1:
-                    self.sample_model(args.sample_dir, epoch, idx)
+                if np.mod(counter, args.sample_freq) == 1:
+                    self.sample_model(args.sample_dir, epoch, idx, args.sample_weights)
 
                 if np.mod(counter, 500) == 2:
                     self.save(args.checkpoint_dir, counter)
+        
+        with open('/root/userspace/eye2mouth/log.csv', 'w') as f:
+            writer = csv.writer(f, lineterminator='\n')
+            writer.writerows(np.array(log_loss))
 
     def discriminator(self, image, y=None, reuse=False):
 
@@ -219,7 +263,7 @@ class pix2pix(object):
             # h3 is (16 x 16 x self.df_dim*8)
             h4 = linear(tf.reshape(h3, [self.batch_size, -1]), 1, 'd_h3_lin')
 
-            return tf.nn.sigmoid(h4), h4
+            return tf.nn.sigmoid(h4), h4, h3
 
     def generator(self, image, y=None):
         with tf.variable_scope("generator") as scope:
@@ -383,7 +427,7 @@ class pix2pix(object):
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
 
-        sample_files = glob('./datasets/{}/val/*.jpg'.format(self.dataset_name))
+        sample_files = glob('/root/userspace/eye2mouth/datasets/{}/val/*.jpg'.format(self.dataset_name))
 
         # sort testing input
         # n = [int(i) for i in map(lambda x: x.split('/')[-1].split('.jpg')[0], sample_files)]
@@ -417,12 +461,10 @@ class pix2pix(object):
                 self.fake_B_sample,
                 feed_dict={self.real_data: sample_image}
             )
-
             sample_image_a = sample_image[:, :, :, :3]
-
             samples_concat = np.concatenate((sample_image_a, samples), axis=2)
             samples_concat = imresize_batch(samples_concat, (self.image_size, self.image_size))
             samples_concat = rot90_batch(samples_concat, 3)
-
+            print('saving them in /root/userspace/eye2mouth/{}/'.format(args.test_dir))
             save_images(samples_concat, [self.batch_size, 1],
-                        './{}/test_{:04d}.png'.format(args.test_dir, idx))
+                        '/root/userspace/eye2mouth/{}/test_{:04d}.png'.format(args.test_dir, idx))
