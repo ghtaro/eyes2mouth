@@ -126,31 +126,59 @@ class pix2pix(object):
             sample_images = np.array(sample).astype(np.float32)
         return sample_images
 
-    def save_weights(self, sample_dir, epoch, idx, d_h3, w_name, b_name, save_name):
-        ws = [v for v in tf.trainable_variables() if v.name == w_name][0]
+    def proess_weights(self, d_h3):
+        ws = [v for v in tf.trainable_variables() if v.name == 'discriminator/d_h3_lin/Matrix:0'][0]
         ws = ws.eval() # tf.Tensor -> np array
         ws = ws.flatten() # np array (n,1) -> (n)
         ws = np.reshape(ws, (16,32,512)) # np array reshape
-        b = [v for v in tf.trainable_variables() if v.name == b_name][0]
+        b = [v for v in tf.trainable_variables() if v.name == 'discriminator/d_h3_lin/bias:0'][0]
         b = b.eval()
-        sample_weights = np.sum(ws * d_h3 + b, axis=3) # sum [batch_size,16,16,1024] along the axis=3
+        sample_weights = np.sum(ws * d_h3 + b, axis=3) # sum [batch_size,16,32,512] along the axis=3
         sample_weights = sample_weights[:,:,:,np.newaxis] # add new axis (with size 1) for color
         sample_weights = np.insert(sample_weights, 1, 0, axis=3)
         sample_weights = np.insert(sample_weights, 2, 0, axis=3)
-        sample_weights = rot90_batch(sample_weights, 3)
-        sample_weights_resize = []
-        for s in sample_weights:
-            s_max = (s.max(axis=0)).max(axis=0)[0] # only first-dim is filled with non-zero value
-            s_min = (s.min(axis=0)).min(axis=0)[0] # only first-dim is filled with non-zero value
-            shift = np.array([s_min, 0, 0])
-            norm = np.array([1.0/(s_max-s_min), 1.0, 1.0])
-            s = (255.0-(s-shift)*norm*255.0).astype(np.uint8) # black <-> white
-            s[:,:,1]=s[:,:,2]=s[:,:,0] # color to grey-scale
-            s_image = Image.fromarray(s, 'RGB')
-            s_image = s_image.resize((self.image_size, self.image_size))
-            sample_weights_resize.append(np.array(s_image))
-        sample_weights_resize = np.array(sample_weights_resize)
-        save_images(sample_weights_resize, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/{}_{:02d}_{:04d}.png'.format(sample_dir, save_name, epoch, idx))
+        sample_weights = rot90_batch(sample_weights, 3) # [batch_size, 32, 16, 512]
+        return sample_weights
+    
+    def save_real_fake_images_weights(self, sample_images, samples_concat, real_weights, fake_weights, sample_dir, epoch, idx):
+        all_resize = []
+        for sr, sf, r, f in zip(sample_images, samples_concat, real_weights, fake_weights):
+            r0 = r[:,:,0]  # only first-dim is filled with non-zero value
+            r_max = (r0.max(axis=0)).max(axis=0)
+            r_min = (r0.min(axis=0)).min(axis=0)
+            f0 = f[:,:,0]  # only first-dim is filled with non-zero value
+            f_max = (f0.max(axis=0)).max(axis=0)
+            f_min = (f0.min(axis=0)).min(axis=0)
+            s_max = np.max((r_max, f_max))
+            s_min = np.min((r_min, f_min))
+            r_pos = np.where(r0 > 0, r0, 0) / s_max * 255.0 # positive part and normalised [0,255]
+            r_neg = np.where(r0 < 0, r0, 0) / s_min * 255.0 # negative part and normalised [0,255]
+            f_pos = np.where(f0 > 0, f0, 0) / s_max * 255.0 # positive part and normalised [0,255]
+            f_neg = np.where(f0 < 0, f0, 0) / s_min * 255.0 # negative part and normalised [0,255]
+
+            r[:,:,0] = r_neg # Red for negative
+            r[:,:,1] = 0 # Green if s0 is 0
+            r[:,:,2] = r_pos # Blue for positive
+            r[0,:,] = 255.0 # border to white
+            r = r.astype(np.uint8) # to adapt to nparray to image
+
+            f[:,:,0] = f_neg # Red for negative
+            f[:,:,1] = 0 # Green if s0 is 0
+            f[:,:,2] = f_pos # Blue for positive
+            f[0,:,] = f[:,0,] = 255.0 # border to white
+            f = f.astype(np.uint8) # to adapt to nparray to image
+            
+            s1 = np.concatenate([sr, sf], axis=1)
+            s1 = scipy.misc.imresize(s1, (self.image_size, self.image_size*2))
+            s1_image = Image.fromarray(s1, 'RGB')
+            s2 = np.concatenate([r, f], axis=1)
+            s2_image = Image.fromarray(s2, 'RGB')
+            s2_image = s2_image.resize((self.image_size*2, self.image_size))
+            s_image = get_concat_h(s1_image, s2_image)
+            all_resize.append(np.array(s_image))
+            
+        all_resize = np.array(all_resize)
+        save_images(all_resize, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/{}_{:02d}_{:04d}.png'.format(sample_dir, 'faces_and_weights', epoch, idx))
     
     def sample_model(self, sample_dir, epoch, idx, save_weights=False):
         sample_images = self.load_random_samples()
@@ -158,12 +186,17 @@ class pix2pix(object):
         sample_a = sample_images[:, :, :, :3]
         samples_concat = np.concatenate((sample_a, samples), axis=2)
         samples_concat = rot90_batch(samples_concat, 3)
-        samples_concat = imresize_batch(samples_concat, (self.image_size, self.image_size))
         if save_weights:
-            self.save_weights(sample_dir, epoch, idx, d_h3_, 'discriminator/d_h3_lin/Matrix:0', 'discriminator/d_h3_lin/bias:0', 'fake')
-            self.save_weights(sample_dir, epoch, idx, d_h3, 'discriminator/d_h3_lin/Matrix:0', 'discriminator/d_h3_lin/bias:0', 'real')
-        
-        save_images(samples_concat, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
+            sample1 = sample_images[:,:,:,:3]
+            sample2 = sample_images[:,:,:,3:]
+            real_images = np.concatenate((sample1, sample2), axis=2)
+            real_images = rot90_batch(real_images, 3)
+            fake_weights = self.proess_weights(d_h3_)
+            real_weights = self.proess_weights(d_h3)
+            self.save_real_fake_images_weights(real_images, samples_concat, real_weights, fake_weights, sample_dir, epoch, idx)
+        else:
+            samples_concat = imresize_batch(samples_concat, (self.image_size, self.image_size))
+            save_images(samples_concat, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
         print("[Sample] d_loss: {:.8f}, g_loss: {:.8f}".format(d_loss, g_loss))
 
     def train(self, args):
@@ -218,7 +251,7 @@ class pix2pix(object):
                                                feed_dict={ self.real_data: batch_images })
                 self.writer.add_summary(summary_str, counter)
 
-                # Try three time g_optim (My change. I want to reduce the effect of L1 norm.)
+                # Try three time g_optim (my change. I want to reduce the effect of L1 norm.)
                 _, summary_str = self.sess.run([g_optim, self.g_sum],
                                                feed_dict={ self.real_data: batch_images })
                 self.writer.add_summary(summary_str, counter)
