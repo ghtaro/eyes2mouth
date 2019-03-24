@@ -18,15 +18,14 @@ def gen_concat_dataset(names, is_train, im_size, cropped_dir, dataset_dir):
     for name in names:
         im_path = os.path.join(cropped_dir, name)
         im = imread(im_path)
-        im = np.rot90(im)
-        im = imresize(im, (im_size, im_size*2))
+        im = imresize(im, (im_size, im_size)) # square image
         imsave(os.path.join(dataset_dir, mode, name), im)
         print(name)
 
 val_size = args.valsize
 im_size = args.imsize
-cropped_dir = "input/cropped"
-dataset_dir = "datasets/face{}".format(im_size)
+cropped_dir = "/root/userspace/eye2mouth/input_square"
+dataset_dir = "/root/userspace/eye2mouth/datasets/face_square{}".format(im_size)
 train_dir = os.path.join(dataset_dir, "train")
 val_dir = os.path.join(dataset_dir, "val")
 os.makedirs(train_dir, exist_ok=True)

@@ -74,47 +74,50 @@ class pix2pix(object):
         self.build_model()
 
     def build_model(self):
-        self.real_data = tf.placeholder(tf.float32,
-                                        [self.batch_size, self.image_size, self.image_size,
-                                         self.input_c_dim + self.output_c_dim],
+        self.real_data = tf.placeholder(tf.float32, [self.batch_size, self.image_size, self.image_size, self.input_c_dim + self.output_c_dim], \
                                         name='real_A_and_B_images')
 
-        self.real_A = self.real_data[:, :, :, :self.input_c_dim]
-        self.real_B = self.real_data[:, :, :, self.input_c_dim:self.input_c_dim + self.output_c_dim]
+        self.real_A = self.real_data[:, :, :, :self.input_c_dim] # upper-half:real, lower-half:blank(in black)
+        self.real_AB = self.real_data[:, :, :, self.input_c_dim:self.input_c_dim + self.output_c_dim] # entirely real image
 
-        self.fake_B = self.generator(self.real_A)
+        # generate a full face image given real_A
+        self.fake_AB = self.generator(self.real_A)
 
-        self.real_AB = tf.concat([self.real_A, self.real_B], 2)
-        self.fake_AB = tf.concat([self.real_A, self.fake_B], 2)
+        #self.real_AB = tf.concat([self.real_A, self.real_B], 2)
+        #self.fake_AB = tf.concat([self.real_A, self.fake_B], 2)
+        # D(return of the sigmoid: probability), D_logits(before sigmoid), D_h3(matrix passed to linear+sigmoid)
         self.D, self.D_logits, self.D_h3 = self.discriminator(self.real_AB, reuse=False)
         self.D_, self.D_logits_, self.D_h3_ = self.discriminator(self.fake_AB, reuse=True)
 
-        self.fake_B_sample = self.sampler(self.real_A)
+        # sampling by using valiation data 
+        self.fake_AB_sample = self.sampler(self.real_A)
 
+        # logging - No idea how to check these values afterwards...
         self.d_sum = tf.summary.histogram("d", self.D)
         self.d__sum = tf.summary.histogram("d_", self.D_)
-        self.fake_B_sum = tf.summary.image("fake_B", self.fake_B)
+        self.fake_AB_sum = tf.summary.image("fake_AB", self.fake_AB)
         
+        # Cross entropy loss function
         self.d_loss_real = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits, labels=tf.ones_like(self.D)))
         self.d_loss_fake = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.zeros_like(self.D_)))
         self.g_loss = tf.reduce_mean(tf.nn.sigmoid_cross_entropy_with_logits(logits=self.D_logits_, labels=tf.ones_like(self.D_))) \
-                        + self.L1_lambda * tf.reduce_mean(tf.abs(self.real_B - self.fake_B))
+                        + self.L1_lambda * tf.reduce_mean(tf.abs(self.real_AB - self.fake_AB)) # added a term proportional to |real_AB - fake_AB| for whatever reasons
 
         self.d_loss_real_sum = tf.summary.scalar("d_loss_real", self.d_loss_real)
         self.d_loss_fake_sum = tf.summary.scalar("d_loss_fake", self.d_loss_fake)
 
+        # total d_loss
         self.d_loss = self.d_loss_real + self.d_loss_fake
 
         self.g_loss_sum = tf.summary.scalar("g_loss", self.g_loss)
         self.d_loss_sum = tf.summary.scalar("d_loss", self.d_loss)
 
+        # collect all model weights (beginning with d_ and g_) defined in this TF graph
         t_vars = tf.trainable_variables()
-
         self.d_vars = [var for var in t_vars if 'd_' in var.name]
         self.g_vars = [var for var in t_vars if 'g_' in var.name]
-
+        
         self.saver = tf.train.Saver()
-
 
     def load_random_samples(self):
         data = np.random.choice(glob('/root/userspace/eye2mouth/datasets/{}/val/*.jpg'.format(self.dataset_name)), self.batch_size)
@@ -130,31 +133,30 @@ class pix2pix(object):
         ws = [v for v in tf.trainable_variables() if v.name == 'discriminator/d_h3_lin/Matrix:0'][0]
         ws = ws.eval() # tf.Tensor -> np array
         ws = ws.flatten() # np array (n,1) -> (n)
-        ws = np.reshape(ws, (16,32,512)) # np array reshape
+        ws = np.reshape(ws, (16,16,512)) # np array reshape
         b = [v for v in tf.trainable_variables() if v.name == 'discriminator/d_h3_lin/bias:0'][0]
         b = b.eval()
-        sample_weights = np.sum(ws * d_h3 + b, axis=3) # sum [batch_size,16,32,512] along the axis=3
+        sample_weights = np.sum(ws * d_h3 + b, axis=3) # sum [batch_size,16,16,512] along the axis=3
         sample_weights = sample_weights[:,:,:,np.newaxis] # add new axis (with size 1) for color
         sample_weights = np.insert(sample_weights, 1, 0, axis=3)
         sample_weights = np.insert(sample_weights, 2, 0, axis=3)
-        sample_weights = rot90_batch(sample_weights, 3) # [batch_size, 32, 16, 512]
+        sample_weights = rot90_batch(sample_weights, 3) # [batch_size, 16, 16, 512]
         return sample_weights
     
-    def save_real_fake_images_weights(self, sample_images, samples_concat, real_weights, fake_weights, sample_dir, epoch, idx):
+    def save_real_fake_images_weights(self, real_images, fake_images, real_weights, fake_weights, sample_dir, epoch, idx, D_lgt, D_lgt_):
         all_resize = []
-        for sr, sf, r, f in zip(sample_images, samples_concat, real_weights, fake_weights):
+        for sr, sf, r, f in zip(real_images, fake_images, real_weights, fake_weights):
             r0 = r[:,:,0]  # only first-dim is filled with non-zero value
             r_max = (r0.max(axis=0)).max(axis=0)
             r_min = (r0.min(axis=0)).min(axis=0)
             f0 = f[:,:,0]  # only first-dim is filled with non-zero value
             f_max = (f0.max(axis=0)).max(axis=0)
             f_min = (f0.min(axis=0)).min(axis=0)
-            s_max = np.max((r_max, f_max))
-            s_min = np.min((r_min, f_min))
+            s_max = np.max((r_max, f_max, np.abs(r_min), np.abs(f_min)))
             r_pos = np.where(r0 > 0, r0, 0) / s_max * 255.0 # positive part and normalised [0,255]
-            r_neg = np.where(r0 < 0, r0, 0) / s_min * 255.0 # negative part and normalised [0,255]
+            r_neg = np.where(r0 < 0, r0, 0) / (-s_max) * 255.0 # negative part and normalised [0,255]
             f_pos = np.where(f0 > 0, f0, 0) / s_max * 255.0 # positive part and normalised [0,255]
-            f_neg = np.where(f0 < 0, f0, 0) / s_min * 255.0 # negative part and normalised [0,255]
+            f_neg = np.where(f0 < 0, f0, 0) / (-s_max) * 255.0 # negative part and normalised [0,255]
 
             r[:,:,0] = r_neg # Red for negative
             r[:,:,1] = 0 # Green if s0 is 0
@@ -168,8 +170,11 @@ class pix2pix(object):
             f[0,:,] = f[:,0,] = 255.0 # border to white
             f = f.astype(np.uint8) # to adapt to nparray to image
             
-            s1 = np.concatenate([sr, sf], axis=1)
-            s1 = scipy.misc.imresize(s1, (self.image_size, self.image_size*2))
+            w = sr.shape[0]
+            wu = int(w/2)
+            srf = np.concatenate((sr[:wu, :], sf[wu:, :]), axis=0)
+            s1 = np.concatenate([sr, sf, srf], axis=1)
+            s1 = scipy.misc.imresize(s1, (self.image_size, self.image_size*3))
             s1_image = Image.fromarray(s1, 'RGB')
             s2 = np.concatenate([r, f], axis=1)
             s2_image = Image.fromarray(s2, 'RGB')
@@ -179,24 +184,25 @@ class pix2pix(object):
             
         all_resize = np.array(all_resize)
         save_images(all_resize, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/{}_{:02d}_{:04d}.png'.format(sample_dir, 'faces_and_weights', epoch, idx))
-    
-    def sample_model(self, sample_dir, epoch, idx, save_weights=False):
+        with open('/root/userspace/eye2mouth/{}/log_{:02d}_{:04d}.csv'.format(sample_dir, epoch, idx), 'w') as f:
+            writer = csv.writer(f, lineterminator='\n')
+            writer.writerows(np.concatenate([np.array(D_lgt), np.array(D_lgt_)], axis=1))
+
+    def sample_model(self, sample_dir, epoch, idx, save_weights):
+        # Get valiation data
         sample_images = self.load_random_samples()
-        samples, d_loss, g_loss, d_h3, d_h3_ = self.sess.run([self.fake_B_sample, self.d_loss, self.g_loss, self.D_h3, self.D_h3_], feed_dict={self.real_data: sample_images})
-        sample_a = sample_images[:, :, :, :3]
-        samples_concat = np.concatenate((sample_a, samples), axis=2)
-        samples_concat = rot90_batch(samples_concat, 3)
+        # Run the TF graph and get the variables we want
+        samples_fake, d_loss, g_loss, d_h3, d_h3_, D_lgt, D_lgt_ = self.sess.run([self.fake_AB_sample, self.d_loss, self.g_loss, self.D_h3, self.D_h3_, self.D_logits, self.D_logits_],\
+                                                                            feed_dict={self.real_data: sample_images})
         if save_weights:
-            sample1 = sample_images[:,:,:,:3]
-            sample2 = sample_images[:,:,:,3:]
-            real_images = np.concatenate((sample1, sample2), axis=2)
-            real_images = rot90_batch(real_images, 3)
+            sample_real = sample_images[:,:,:,3:]
             fake_weights = self.proess_weights(d_h3_)
             real_weights = self.proess_weights(d_h3)
-            self.save_real_fake_images_weights(real_images, samples_concat, real_weights, fake_weights, sample_dir, epoch, idx)
+            self.save_real_fake_images_weights(sample_real, samples_fake, real_weights, fake_weights, sample_dir, epoch, idx, D_lgt, D_lgt_)
+
         else:
-            samples_concat = imresize_batch(samples_concat, (self.image_size, self.image_size))
-            save_images(samples_concat, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
+            samples_fake = imresize_batch(samples_fake, (self.image_size, self.image_size))
+            save_images(samples_fake, [self.batch_size, 1], '/root/userspace/eye2mouth/{}/train_{:02d}_{:04d}.png'.format(sample_dir, epoch, idx))
         print("[Sample] d_loss: {:.8f}, g_loss: {:.8f}".format(d_loss, g_loss))
 
     def train(self, args):
@@ -209,8 +215,7 @@ class pix2pix(object):
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
 
-        self.g_sum = tf.summary.merge([self.d__sum,
-            self.fake_B_sum, self.d_loss_fake_sum, self.g_loss_sum])
+        self.g_sum = tf.summary.merge([self.d__sum, self.fake_AB_sum, self.d_loss_fake_sum, self.g_loss_sum])
         self.d_sum = tf.summary.merge([self.d_sum, self.d_loss_real_sum, self.d_loss_sum])
         self.writer = tf.summary.FileWriter("/root/userspace/eye2mouth/logs", self.sess.graph)
 
@@ -262,8 +267,7 @@ class pix2pix(object):
 
                 counter += 1
                 print("Epoch: [%2d] [%4d/%4d] time: %4.4f, d_loss: %.8f, g_loss: %.8f" \
-                    % (epoch, idx, batch_idxs,
-                        time.time() - start_time, errD_fake+errD_real, errG))
+                      % (epoch, idx, batch_idxs, time.time() - start_time, errD_fake+errD_real, errG))
                 log_loss.append([epoch, idx, batch_idxs, time.time() - start_time, errD_fake+errD_real, errG])
 
                 if np.mod(counter, args.sample_freq) == 1:
@@ -280,7 +284,7 @@ class pix2pix(object):
 
         with tf.variable_scope("discriminator") as scope:
 
-            # image is 256 x 256 x (input_c_dim + output_c_dim)
+            # image is 256 x 256 x input_c_dim
             if reuse:
                 tf.get_variable_scope().reuse_variables()
             else:

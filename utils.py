@@ -8,6 +8,7 @@ import random
 import pprint
 import scipy.misc
 import numpy as np
+from PIL import Image
 from time import gmtime, strftime
 
 pp = pprint.PrettyPrinter()
@@ -18,9 +19,10 @@ get_stddev = lambda x, k_h, k_w: 1/math.sqrt(k_w*k_h*x.get_shape()[-1])
 # new added functions for pix2pix
 
 def load_data(image_path, flip=True, is_test=False, fine_size=256):
-    img_A, img_B = load_image(image_path)
+    img_A, img_B = load_image(image_path) # img_A(black for the lower-half), img_B(original image)
     img_A, img_B = preprocess_A_and_B(img_A, img_B, fine_size=fine_size, flip=flip, is_test=is_test)
 
+    # [0,255] -> [-1,1]
     img_A = img_A/127.5 - 1.
     img_B = img_B/127.5 - 1.
 
@@ -30,11 +32,13 @@ def load_data(image_path, flip=True, is_test=False, fine_size=256):
 
 def load_image(image_path):
     input_img = imread(image_path)
-    w = int(input_img.shape[1])
-    w2 = int(w/2)
-    img_A = input_img[:, 0:w2]
-    img_B = input_img[:, w2:w]
-
+    w = int(input_img.shape[0])
+    wu = int(w/2)
+    wd = w - wu
+    img_A = input_img[0:wu, :]
+    img_blank = np.zeros([wd, input_img.shape[1], input_img.shape[2]]) # the lower-half is in black
+    img_A = np.concatenate((img_A, img_blank), axis=0)
+    img_B = input_img # the original image
     return img_A, img_B
 
 def preprocess_A_and_B(img_A, img_B, load_size=286, fine_size=256, flip=True, is_test=False):
@@ -44,17 +48,11 @@ def preprocess_A_and_B(img_A, img_B, load_size=286, fine_size=256, flip=True, is
     else:
         img_A = scipy.misc.imresize(img_A, [fine_size, fine_size])
         img_B = scipy.misc.imresize(img_B, [fine_size, fine_size])
-        # img_A = scipy.misc.imresize(img_A, [load_size, load_size])
-        # img_B = scipy.misc.imresize(img_B, [load_size, load_size])
-        #
-        # h1 = int(np.ceil(np.random.uniform(1e-2, load_size-fine_size)))
-        # w1 = int(np.ceil(np.random.uniform(1e-2, load_size-fine_size)))
-        # img_A = img_A[h1:h1+fine_size, w1:w1+fine_size]
-        # img_B = img_B[h1:h1+fine_size, w1:w1+fine_size]
 
+        # Left-Right flipping for data-augmentation
         if flip and np.random.random() > 0.5:
-            img_A = np.flipud(img_A)
-            img_B = np.flipud(img_B)
+            img_A = np.fliplr(img_A)
+            img_B = np.fliplr(img_B)
 
     return img_A, img_B
 
@@ -111,3 +109,8 @@ def imresize_batch(arrs, *args, **kwargs):
         batch.append(scipy.misc.imresize(arr, *args, **kwargs))
     return np.stack(batch, axis=0)
 
+def get_concat_h(im1, im2):
+    dst = Image.new('RGB', (im1.width + im2.width, im1.height))
+    dst.paste(im1, (0, 0))
+    dst.paste(im2, (im1.width, 0))
+    return dst
