@@ -125,3 +125,24 @@ def get_concat_h(im1, im2):
     dst.paste(im1, (0, 0))
     dst.paste(im2, (im1.width, 0))
     return dst
+
+# make the boundary a border in white
+def make_border(image, l, r, t, b):
+    if l:
+        image[0,:,:] = 255.0 # border to white
+    if r:
+        image[image.shape[0]-1,:,:] = 255.0 # border to white
+    if t:
+        image[:,0,:] = 255.0 # border to white
+    if b:
+        image[:,image.shape[1]-1,:] = 255.0 # border to white
+    return image
+
+def mono_to_rgb_bar(image, s_max):
+    image0 = image[:,:,0]
+    blue = np.where(image0 > 0, image0, 0) /     s_max * 255.0 # positive part and normalised [0,255]
+    red = np.where(image0 < 0, image0, 0) / (-s_max) * 255.0 # negative part and normalised [0,255]
+    image[:,:,0] = red # Red for negative
+    image[:,:,1] = 0 # Green if s0 is 0
+    image[:,:,2] = blue # Blue for positive
+    return image

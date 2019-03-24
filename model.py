@@ -83,8 +83,7 @@ class pix2pix(object):
         # generate a full face image given real_A
         self.fake_AB = self.generator(self.real_A)
 
-        #self.real_AB = tf.concat([self.real_A, self.real_B], 2)
-        #self.fake_AB = tf.concat([self.real_A, self.fake_B], 2)
+
         # D(return of the sigmoid: probability), D_logits(before sigmoid), D_h3(matrix passed to linear+sigmoid)
         self.D, self.D_logits, self.D_h3 = self.discriminator(self.real_AB, reuse=False)
         self.D_, self.D_logits_, self.D_h3_ = self.discriminator(self.fake_AB, reuse=True)
@@ -153,21 +152,11 @@ class pix2pix(object):
             f_max = (f0.max(axis=0)).max(axis=0)
             f_min = (f0.min(axis=0)).min(axis=0)
             s_max = np.max((r_max, f_max, np.abs(r_min), np.abs(f_min)))
-            r_pos = np.where(r0 > 0, r0, 0) / s_max * 255.0 # positive part and normalised [0,255]
-            r_neg = np.where(r0 < 0, r0, 0) / (-s_max) * 255.0 # negative part and normalised [0,255]
-            f_pos = np.where(f0 > 0, f0, 0) / s_max * 255.0 # positive part and normalised [0,255]
-            f_neg = np.where(f0 < 0, f0, 0) / (-s_max) * 255.0 # negative part and normalised [0,255]
-
-            r[:,:,0] = r_neg # Red for negative
-            r[:,:,1] = 0 # Green if s0 is 0
-            r[:,:,2] = r_pos # Blue for positive
-            r[0,:,] = 255.0 # border to white
+            r = mono_to_rgb_bar(r, s_max)
+            r = make_border(r, True, False, False, False)
             r = r.astype(np.uint8) # to adapt to nparray to image
-
-            f[:,:,0] = f_neg # Red for negative
-            f[:,:,1] = 0 # Green if s0 is 0
-            f[:,:,2] = f_pos # Blue for positive
-            f[0,:,] = f[:,0,] = 255.0 # border to white
+            f = mono_to_rgb_bar(f, s_max)
+            f = make_border(f, True, False, True, False) # why also top??
             f = f.astype(np.uint8) # to adapt to nparray to image
             
             w = sr.shape[0]
@@ -207,10 +196,8 @@ class pix2pix(object):
 
     def train(self, args):
         """Train pix2pix"""
-        d_optim = tf.train.AdamOptimizer(args.lrd, beta1=args.beta1) \
-                          .minimize(self.d_loss, var_list=self.d_vars)
-        g_optim = tf.train.AdamOptimizer(args.lrg, beta1=args.beta1) \
-                          .minimize(self.g_loss, var_list=self.g_vars)
+        d_optim = tf.train.AdamOptimizer(args.lrd, beta1=args.beta1).minimize(self.d_loss, var_list=self.d_vars)
+        g_optim = tf.train.AdamOptimizer(args.lrg, beta1=args.beta1).minimize(self.g_loss, var_list=self.g_vars)
 
         init_op = tf.global_variables_initializer()
         self.sess.run(init_op)
