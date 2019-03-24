@@ -18,9 +18,9 @@ get_stddev = lambda x, k_h, k_w: 1/math.sqrt(k_w*k_h*x.get_shape()[-1])
 # -----------------------------
 # new added functions for pix2pix
 
-def load_data(image_path, flip=True, is_test=False, fine_size=256):
+def load_data(image_path, flip=True, is_test=False, fine_size=256, rotate=True, max_angle=1.0):
     img_A, img_B = load_image(image_path) # img_A(black for the lower-half), img_B(original image)
-    img_A, img_B = preprocess_A_and_B(img_A, img_B, fine_size=fine_size, flip=flip, is_test=is_test)
+    img_A, img_B = preprocess_A_and_B(img_A, img_B, fine_size=fine_size, flip=flip, is_test=is_test, rotate=rotate, max_angle=max_angle)
 
     # [0,255] -> [-1,1]
     img_A = img_A/127.5 - 1.
@@ -41,7 +41,7 @@ def load_image(image_path):
     img_B = input_img # the original image
     return img_A, img_B
 
-def preprocess_A_and_B(img_A, img_B, load_size=286, fine_size=256, flip=True, is_test=False):
+def preprocess_A_and_B(img_A, img_B, load_size=286, fine_size=256, flip=True, is_test=False, rotate=True, max_angle=1.0):
     if is_test:
         img_A = scipy.misc.imresize(img_A, [fine_size, fine_size])
         img_B = scipy.misc.imresize(img_B, [fine_size, fine_size])
@@ -53,6 +53,17 @@ def preprocess_A_and_B(img_A, img_B, load_size=286, fine_size=256, flip=True, is
         if flip and np.random.random() > 0.5:
             img_A = np.fliplr(img_A)
             img_B = np.fliplr(img_B)
+        
+        # Rotation for data-augmentation
+        if rotate and np.random.random() > 0.5:
+            height = img_A.shape[0]
+            width = img_A.shape[1]
+            center = (int(width/2), int(height/2))
+            angle = (2.0 * np.random.random() - 1.0) * max_angle / (2.0 * np.pi)
+            scale = 1.0
+            trans = cv2.getRotationMatrix2D(center, angle, scale)
+            img_A = cv2.warpAffine(img_A, trans, (width, height))
+            img_B = cv2.warpAffine(img_B, trans, (width, height))
 
     return img_A, img_B
 
